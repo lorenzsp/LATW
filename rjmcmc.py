@@ -210,18 +210,18 @@ def generate_global_template(template, params_all, **waveform_kwargs):
     
 def global_log_likelihood(params_all, analysis, Tobs, dt, waveform_kwargs, transform_containers):
     # breakpoint()
+    # return 0.0
+    template = np.zeros_like(analysis.data_res_arr[:])
+
     gb_params_1 = params_all[0]
     gb_params_2 = params_all[1]
     mbh_params = params_all[2]
-    
-    mbh_params_in = transform_containers["mbh"].both_transforms(mbh_params)
-
-    # print(input_parameters)
-
-    AET = tdi_wave_gen(*mbh_params_in.T, **waveform_kwargs["mbh"])
-    template = np.zeros_like(analysis.data_res_arr[:])
-    template[0] += AET[0, 0]
-    template[1] += AET[0, 1]
+    # if mbh_params is not None:
+    #     mbh_params_in = transform_containers["mbh"].both_transforms(mbh_params)
+    #     AET = tdi_wave_gen(*mbh_params_in.T, **waveform_kwargs["mbh"])
+        
+    #     template[0] += AET[0, 0]
+    #     template[1] += AET[0, 1]
 
     if gb_params_1 is not None:
         gb_params_1_in = transform_containers["gb_1"].both_transforms(gb_params_1)
@@ -289,12 +289,12 @@ class NonScaledDiagonalGaussianMove(MHMove):
 
 # %%
 
-nleaves_max = {"gb_1": 10, "gb_2": 10, "mbh": 1}
+nleaves_max = {"gb_1": 50, "gb_2": 50, "mbh": 1}
 nleaves_min = {"gb_1": 0, "gb_2": 0, "mbh": 0}
 ndims = {"gb_1": 8, "gb_2": 8, "mbh": 11}
 
-nwalkers = 8
-ntemps = 3
+nwalkers = 16
+ntemps = 4
 
 diag_cov = np.array([1e-24, 1e-10, 1e-19, 0.01, 0.01, 0.01, 0.01, 0.01])
 cov_1    = {"gb_1": diag_cov}
@@ -310,7 +310,7 @@ moves = [gb_move_1, gb_move_2, mbh_move]
 priors = {
     "gb_1": ProbDistContainer({
         0: uniform_dist(1e-23, 2e-22),
-        1: uniform_dist(0.00400, 0.00401),
+        1: uniform_dist(1e-4, 1e-3),
         2: uniform_dist(0.01e-17, 2e-17),
         3: uniform_dist(0.0, 2 * np.pi),
         4: uniform_dist(-1.0, 1.0),
@@ -320,7 +320,7 @@ priors = {
     }),
     "gb_2": ProbDistContainer({
         0: uniform_dist(1e-23, 2e-22),
-        1: uniform_dist(0.00500, 0.00501),
+        1: uniform_dist(1e-3, 1e-2),
         2: uniform_dist(1e-17, 1e-18),
         3: uniform_dist(0.0, 2 * np.pi),
         4: uniform_dist(-1.0, 1.0),
@@ -399,7 +399,32 @@ periodic = {
     "gb_2": {3: 2 * np.pi, 5: np.pi, 6: 2 * np.pi},
     "mbh": {5: 2 * np.pi, 7: 2 * np.pi, 9: np.pi},
 }
+
+def update_fn(ii, state, sampler):
     
+
+    # print histogram index
+    for br in sampler.branch_names:
+        ind_count = np.mean(sampler.get_inds()[br][:,0,:,:],axis=(0,1))
+        print(f"histogram: {ind_count}")
+        plt.figure()
+        plt.bar(np.arange(nleaves_max[br]), ind_count)
+        plt.title(br)
+        plt.savefig(f"{br}_histogram.png")
+    
+    # plot the frequencies
+    for br in sampler.branch_names:
+        if br != "mbh":
+            # sampler.get_inds()[br][:, 0, :]
+            freqs = sampler.get_chain()[br][:,0][sampler.get_inds()[br][:,0]][:,1]
+            plt.figure()
+            plt.hist(freqs.flatten(), bins=30)
+            plt.title(br)
+            plt.savefig(f"{br}_frequencies.png")
+    # print information on activate leaves and non active
+    # print information on the acceptance rate
+    return state
+
 sampler_rj = EnsembleSampler(
     nwalkers,
     ndims,
@@ -413,7 +438,11 @@ sampler_rj = EnsembleSampler(
     rj_moves=True,  # this will draw from the prior for the GBs
     moves=moves,
     tempering_kwargs=dict(ntemps=ntemps),
-    periodic=periodic
+    periodic=periodic,
+    update_fn=update_fn,
+    update_iterations=10,
+    backend="outfile_rjmcmc.h5",
+
 )
 
 # %%
@@ -421,6 +450,7 @@ from eryn.state import State
 
 # draw from prior and turn all off but 1
 start_points = {key: priors[key].rvs(size=(ntemps, nwalkers, nleaves_max[key])) for key in ["gb_1", "gb_2"]}
+# start from the injection parameters
 
 injection_params_mbh = np.array([
     np.log(m1 + m2),
@@ -441,10 +471,10 @@ start_points["mbh"] = start_params_mbh
 start_inds = {"mbh": np.ones((ntemps, nwalkers, nleaves_max["mbh"]), dtype=bool)}
 
 start_inds["gb_1"] = np.zeros((ntemps, nwalkers, nleaves_max["gb_1"]), dtype=bool)
-start_inds["gb_1"][:, :, :] = True
+start_inds["gb_1"][:, :, 0] = True
 
 start_inds["gb_2"] = np.zeros((ntemps, nwalkers, nleaves_max["gb_2"]), dtype=bool)
-start_inds["gb_2"][:, :, :] = True
+start_inds["gb_2"][:, :, 0] = True
 
 start_state = State(start_points, inds=start_inds)
 
@@ -465,6 +495,4 @@ start_state.log_like = ll[0]
 ll
 
 # %%
-sampler_rj.run_mcmc(start_state, 2, progress=True)
-
-
+sampler_rj.run_mcmc(start_state, 10000, progress=True)
